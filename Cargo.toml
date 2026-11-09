@@ -30,6 +30,7 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "37faef81
 tintcast-theme = { path = "crates/tintcast-theme" }
 tintcast-engine = { path = "crates/tintcast-engine" }
 tintcast-windows = { path = "crates/tintcast-windows" }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 jiff = { version = "0.2.37", features = ["serde"] }
 jsonc-parser = { version = "0.34.0", features = ["cst", "serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -37,7 +38,29 @@ serde_json = "1.0.154"
 sha2 = "0.10.9"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
+toml = "1.2.1"
 windows = "0.62.2"
+
+[profile.dev.package.tintcast-theme]
+opt-level = 3
+
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.png]
+opt-level = 3
+
+[profile.dev.package.image-webp]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.fdeflate]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
 
 [patch.crates-io]
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }

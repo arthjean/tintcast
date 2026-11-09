@@ -7,24 +7,31 @@ use std::time::{Duration, SystemTime};
 
 use tintcast_engine::fake::FakeServices;
 use tintcast_engine::{
-    ApplyRequest, DataDir, Detection, Engine, EngineLock, Integration, Operation, Plan,
-    RegistryValue, ReloadResult, SystemResult, SystemServices, Theme, WallpaperPosition,
+    ApplyRequest, DataDir, Detection, Engine, EngineLock, Integration, Operation, Palette, Plan,
+    RegistryValue, ReloadResult, Rgba, SystemResult, SystemServices, Theme, WallpaperPosition,
 };
 
 pub const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 pub const ACCENT: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent";
 pub const DWM: &str = r"Software\Microsoft\Windows\DWM";
 
+fn palette(background: u8, foreground: u8) -> Palette {
+    Palette::new(
+        Rgba::rgb(background, background, background),
+        Rgba::rgb(foreground, foreground, foreground),
+    )
+}
+
 pub fn moondust() -> Theme {
-    Theme::new("moondust", "Moondust")
+    Theme::new("moondust", "Moondust", palette(0x17, 0xd9))
 }
 
 pub fn daylight() -> Theme {
-    Theme::new("daylight", "Daylight")
+    Theme::new("daylight", "Daylight", palette(0xf4, 0x2b))
 }
 
 pub fn ember() -> Theme {
-    Theme::new("ember", "Ember")
+    Theme::new("ember", "Ember", palette(0x20, 0xe0))
 }
 
 pub fn library(id: &str) -> Option<Theme> {

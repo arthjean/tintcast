@@ -5010,6 +5010,8 @@ dependencies = [
 name = "tintcast-cli"
 version = "0.0.0"
 dependencies = [
+ "image",
+ "tempfile",
  "tintcast-windows",
 ]
 
@@ -5017,6 +5019,7 @@ dependencies = [
 name = "tintcast-engine"
 version = "0.0.0"
 dependencies = [
+ "image",
  "jiff",
  "jsonc-parser",
  "serde",
@@ -5055,7 +5058,11 @@ dependencies = [
 name = "tintcast-theme"
 version = "0.0.0"
 dependencies = [
+ "image",
  "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml 1.2.1+spec-1.1.0",
 ]
 
 [[package]]

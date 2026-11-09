@@ -282,6 +282,50 @@ impl Store {
         Ok(scan)
     }
 
+    pub(crate) fn referenced_files(&self) -> Result<Vec<PathBuf>, EngineError> {
+        fn add_state(state: &ResourceState, out: &mut Vec<PathBuf>) {
+            if let ResourceState::Wallpaper { image } = state {
+                out.push(image.clone());
+            }
+        }
+        fn add_operation(operation: &Operation, out: &mut Vec<PathBuf>) {
+            if let Operation::SetWallpaper { image, .. } = operation {
+                out.push(image.clone());
+            }
+        }
+        let mut out = Vec::new();
+        for entry in self.load_ledger()?.oldest_first() {
+            add_operation(&entry.operation, &mut out);
+            add_state(&entry.original, &mut out);
+            add_state(&entry.applied, &mut out);
+            if let Some(pending) = &entry.pending {
+                add_state(pending, &mut out);
+            }
+        }
+        let history = self.dir.history();
+        if let Some(bytes) = read_optional(&history).map_err(EngineError::io(&history))? {
+            let entries: Vec<HistoryEntry> = decode(&bytes).unwrap_or_default();
+            for entry in entries {
+                for value in &entry.applied {
+                    add_state(&value.value, &mut out);
+                }
+            }
+        }
+        let folder = self.dir.journal();
+        let listing = fs::read_dir(&folder).map_err(EngineError::io(&folder))?;
+        for path in listing.filter_map(|e| e.ok().map(|e| e.path())) {
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(run) = serde_json::from_slice::<JournalRun>(&bytes) else {
+                continue;
+            };
+            for step in &run.steps {
+                add_operation(&step.operation, &mut out);
+                add_state(&step.before, &mut out);
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn load_journal(&self, run_id: &str) -> Result<JournalRun, EngineError> {
         let well_formed = !run_id.is_empty()
             && run_id

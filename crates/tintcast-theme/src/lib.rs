@@ -1,17 +1,82 @@
+mod bundled;
+mod color;
+mod error;
+pub mod generate;
+pub mod limits;
+mod palette;
+mod source;
+pub mod wallpaper;
+
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
+
+pub use bundled::{BUNDLED, BundledTheme, is_bundled};
+pub use color::{ColorParseError, Rgba};
+pub use error::ThemeError;
+pub use palette::{LEGACY_KEYS, Mode, OMARCHY_KEYS, Palette, is_known_key};
+pub use source::{
+    ALACRITTY_FILE, BACKGROUNDS, COLORS_FILE, LIGHT_MARKER, ParsedTheme, SETTINGS_FILE, ThemeFiles,
+    ThemeFolder, display_name, is_link, is_theme_folder, load_folder, parse, points_outside,
+    read_at_most, slugify,
+};
+pub use wallpaper::{Converted, RejectedWallpaper, WallpaperError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Origin {
+    Bundled,
+    Imported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wallpaper {
+    pub source: String,
+    pub image: PathBuf,
+    pub thumbnail: PathBuf,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Theme {
     pub id: String,
     pub name: String,
+    pub author: Option<String>,
+    pub origin: Origin,
+    pub palette: Palette,
+    pub position: WallpaperPosition,
+    pub wallpapers: Vec<Wallpaper>,
 }
 
 impl Theme {
-    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<String>, name: impl Into<String>, palette: Palette) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
+            author: None,
+            origin: Origin::Imported,
+            palette,
+            position: WallpaperPosition::default(),
+            wallpapers: Vec::new(),
         }
+    }
+
+    pub fn from_parsed(parsed: ParsedTheme, origin: Origin, wallpapers: Vec<Wallpaper>) -> Self {
+        Self {
+            id: parsed.slug,
+            name: parsed.name,
+            author: parsed.author,
+            origin,
+            palette: parsed.palette,
+            position: parsed.position,
+            wallpapers,
+        }
+    }
+
+    pub fn is_bundled(&self) -> bool {
+        self.origin == Origin::Bundled
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.palette.mode
     }
 }
 
