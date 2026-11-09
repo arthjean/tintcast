@@ -6,6 +6,7 @@
 | Version | Date | Author | Summary |
 |---------|------|--------|---------|
 | 1.0 | 2026-11-09 | Arthur Jean | Initial draft |
+| 1.1 | 2026-11-09 | Arthur Jean | US-008: phase 0's Moondust is Scene's Moondust (same name and palette), so it is replaced by the original Ironwood; the extra themes are Inkwell and Linen |
 
 ## Problem Statement
 
@@ -319,7 +320,7 @@ This epic lets Tintcast read Omarchy-layout theme folders into exact colors and 
 **Dependencies:** Blocked by US-005, US-006
 
 **Acceptance Criteria:**
-- [ ] The binary embeds four original themes: Moondust (dark) and Daylight (light) from phase 0, plus one more dark and one more light theme. Their names differ from every Omarchy theme name, from Scene's theme names, and from Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night, and Rosé Pine.
+- [ ] The binary embeds four original themes: Daylight (light) from phase 0, Ironwood (dark), Inkwell (dark), and Linen (light). Phase 0's Moondust is not bundled: its name and palette are Scene's. Their names differ from every Omarchy theme name, from Scene's theme names, and from Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night, and Rosé Pine.
 - [ ] At first use, each theme gets three 3840 by 2160 wallpapers generated from its palette. The output is deterministic: the same palette gives the same bytes.
 - [ ] A test checks contrast for every bundled palette: foreground on background is at least 4.5:1, and ANSI colors 1 to 6 and 9 to 14 are each at least 3:1 against background.
 - [ ] Given a bundled theme, when the user deletes it or imports over its slug, then the action is refused with "Bundled themes can't be changed."
@@ -736,7 +737,6 @@ Frame as questions for engineering input, not mandates:
 - **Wallpapers for the bundled themes.** Palette-generated wallpapers are a stopgap. Should the real artwork be commissioned, photographed, or generated with clear rights? Arthur decides before the first public build. The Month-6 tester goal depends on it.
 - **Code signing.** Should Tintcast be signed (for example Azure Trusted Signing, about $10 a month) before outside testers, or tested unsigned behind a SmartScreen warning? Arthur decides before the first outside tester.
 - **Distribution.** Portable zip, winget, or MSIX for the first testers? Arthur decides with the signing question. It shapes how start-at-sign-in finds the executable.
-- **Names for the third and fourth bundled themes.** Arthur picks them during US-008.
 - **Accent on Start and the taskbar.** Should a theme also turn on "Show accent color on Start and taskbar"? Phase 1 says no, to respect the user's choice. Arthur revisits after two weeks of daily use.
 - **Contributor agreement.** Which agreement and tooling for outside pull requests? Arthur decides before the repository goes public. It keeps the option to license Tintcast in other ways.
 [/PRD]
