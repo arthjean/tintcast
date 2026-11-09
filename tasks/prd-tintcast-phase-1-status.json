@@ -9,10 +9,10 @@
     {
       "id": "EP-001",
       "title": "Engine with ledger, journal, and exact restore",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 4,
-      "stories_done": 0
+      "stories_done": 4
     },
     {
       "id": "EP-002",
@@ -52,55 +52,55 @@
       "id": "US-001",
       "title": "Workspace crates and the system seam",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T09:51:43Z",
+      "completed_at": "2026-11-09T10:19:00Z",
+      "reviewed_at": "2026-11-09T10:19:00Z"
     },
     {
       "id": "US-002",
       "title": "Plan, preview, and apply with ledger and journal",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-001"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T10:10:01Z",
+      "completed_at": "2026-11-09T10:19:00Z",
+      "reviewed_at": "2026-11-09T10:19:00Z"
     },
     {
       "id": "US-003",
       "title": "Three-way restore and undo",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-002"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T10:10:01Z",
+      "completed_at": "2026-11-09T10:19:00Z",
+      "reviewed_at": "2026-11-09T10:19:00Z"
     },
     {
       "id": "US-004",
       "title": "Recover an interrupted apply",
       "epic": "EP-001",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "S",
       "blocked_by": [
         "US-002"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T10:10:01Z",
+      "completed_at": "2026-11-09T10:19:00Z",
+      "reviewed_at": "2026-11-09T10:19:00Z"
     },
     {
       "id": "US-005",
