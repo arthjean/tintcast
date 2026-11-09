@@ -1,7 +1,10 @@
 use std::io::Cursor;
 
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{DynamicImage, ImageEncoder, ImageError, ImageFormat, ImageReader, Limits, RgbImage};
+use image::{
+    ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageError, ImageFormat, ImageReader,
+    Limits, RgbImage,
+};
 
 use crate::limits::{MAX_IMAGE_ALLOC, MAX_IMAGE_FILE_BYTES, MAX_IMAGE_SIDE};
 
@@ -50,10 +53,14 @@ pub fn is_image_name(name: &str) -> bool {
 }
 
 pub fn limits() -> Limits {
+    limits_with(MAX_IMAGE_ALLOC)
+}
+
+fn limits_with(max_alloc: u64) -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_SIDE);
     limits.max_image_height = Some(MAX_IMAGE_SIDE);
-    limits.max_alloc = Some(MAX_IMAGE_ALLOC);
+    limits.max_alloc = Some(max_alloc);
     limits
 }
 
@@ -68,7 +75,7 @@ fn classify(error: ImageError) -> WallpaperError {
     }
 }
 
-fn reader(bytes: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, WallpaperError> {
+fn reader(bytes: &[u8], limits: Limits) -> Result<ImageReader<Cursor<&[u8]>>, WallpaperError> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| WallpaperError::Corrupt(e.to_string()))?;
@@ -78,22 +85,37 @@ fn reader(bytes: &[u8]) -> Result<ImageReader<Cursor<&[u8]>>, WallpaperError> {
     ) {
         return Err(WallpaperError::Unsupported);
     }
-    reader.limits(limits());
+    reader.limits(limits);
     Ok(reader)
+}
+
+fn png_capacity(raw: u64) -> u64 {
+    raw + raw / 64 + 4096
 }
 
 pub fn decode(bytes: &[u8]) -> Result<RgbImage, WallpaperError> {
     if bytes.len() as u64 > MAX_IMAGE_FILE_BYTES {
         return Err(WallpaperError::FileTooLarge);
     }
-    let (width, height) = reader(bytes)?.into_dimensions().map_err(classify)?;
+    let decoder = reader(bytes, limits())?.into_decoder().map_err(classify)?;
+    let (width, height) = decoder.dimensions();
+    let color = decoder.color_type();
+    drop(decoder);
     if width > MAX_IMAGE_SIDE || height > MAX_IMAGE_SIDE {
         return Err(WallpaperError::TooLarge);
     }
     if width == 0 || height == 0 {
         return Err(WallpaperError::Corrupt("it has no pixels".into()));
     }
-    let image = reader(bytes)?.decode().map_err(classify)?;
+    let rgb = u64::from(width) * u64::from(height) * 3;
+    let converted = if color == ColorType::Rgb8 { 0 } else { rgb };
+    let after_decode = converted + png_capacity(rgb);
+    let Some(budget) = MAX_IMAGE_ALLOC.checked_sub(after_decode) else {
+        return Err(WallpaperError::TooMuchMemory);
+    };
+    let image = reader(bytes, limits_with(budget))?
+        .decode()
+        .map_err(classify)?;
     Ok(match image {
         DynamicImage::ImageRgb8(rgb) => rgb,
         other => other.to_rgb8(),
@@ -105,7 +127,8 @@ pub fn convert(bytes: &[u8]) -> Result<Converted, WallpaperError> {
 }
 
 fn png(image: &RgbImage) -> Result<Vec<u8>, WallpaperError> {
-    let mut out = Vec::with_capacity(image.as_raw().len() / 2);
+    let raw = image.as_raw().len() as u64;
+    let mut out = Vec::with_capacity(usize::try_from(png_capacity(raw)).unwrap_or(usize::MAX));
     PngEncoder::new_with_quality(&mut out, CompressionType::Fast, FilterType::Adaptive)
         .write_image(
             image.as_raw(),
@@ -132,8 +155,8 @@ pub fn thumbnail(image: &RgbImage) -> RgbImage {
     };
     let x = (width - crop_w) / 2;
     let y = (height - crop_h) / 2;
-    let cropped = image::imageops::crop_imm(image, x, y, crop_w, crop_h).to_image();
-    image::imageops::thumbnail(&cropped, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
+    let cropped = image::imageops::crop_imm(image, x, y, crop_w, crop_h);
+    image::imageops::thumbnail(&*cropped, THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT)
 }
 
 pub fn encode(image: &RgbImage) -> Result<Converted, WallpaperError> {
@@ -211,6 +234,31 @@ mod tests {
             rejected.to_string(),
             "huge.png was skipped: larger than 16384 px."
         );
+    }
+
+    fn png_header(width: u32, height: u32, depth: u8, color: u8) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
+        header.extend_from_slice(&width.to_be_bytes());
+        header.extend_from_slice(&height.to_be_bytes());
+        header.extend_from_slice(&[depth, color, 0, 0, 0]);
+        let ihdr = crc(&header[12..]);
+        header.extend_from_slice(&ihdr.to_be_bytes());
+        header.extend_from_slice(&0u32.to_be_bytes());
+        header.extend_from_slice(b"IDAT");
+        header.extend_from_slice(&crc(b"IDAT").to_be_bytes());
+        header
+    }
+
+    #[test]
+    fn the_memory_budget_counts_the_conversion_and_the_stored_png() {
+        let decoded_fits = png_header(8000, 8000, 16, 6);
+        assert_eq!(
+            decode(&decoded_fits).unwrap_err(),
+            WallpaperError::TooMuchMemory
+        );
+        let ordinary = png_header(3840, 2160, 8, 2);
+        assert!(matches!(decode(&ordinary), Err(WallpaperError::Corrupt(_))));
     }
 
     fn crc(bytes: &[u8]) -> u32 {

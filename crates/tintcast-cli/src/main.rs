@@ -34,6 +34,26 @@ fn parse(args: &[String]) -> Option<Command> {
     }
 }
 
+fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+macro_rules! out {
+    ($($arg:tt)*) => { println!("{}", printable(&format!($($arg)*))) };
+}
+
+macro_rules! err {
+    ($($arg:tt)*) => { eprintln!("{}", printable(&format!($($arg)*))) };
+}
+
 fn open() -> Result<Library, String> {
     let data = DataDir::open().map_err(|e| e.to_string())?;
     Library::open(data).map_err(|e| e.to_string())
@@ -41,13 +61,13 @@ fn open() -> Result<Library, String> {
 
 fn print_load_report(report: &LoadReport) {
     for problem in &report.problems {
-        eprintln!("warning: {problem}");
+        err!("warning: {problem}");
     }
     for rejected in &report.rejected {
-        eprintln!("warning: {rejected}");
+        err!("warning: {rejected}");
     }
     if let Some(reason) = &report.prune_skipped {
-        eprintln!("warning: stored wallpapers were not cleaned up: {reason}");
+        err!("warning: stored wallpapers were not cleaned up: {reason}");
     }
 }
 
@@ -60,7 +80,7 @@ fn list(library: &Library) {
         } else {
             "wallpapers"
         };
-        println!(
+        out!(
             "{}  ({}, {}, {count} {noun}{origin})",
             theme.name,
             theme.id,
@@ -71,7 +91,7 @@ fn list(library: &Library) {
 
 fn print_import(report: &ImportReport) {
     for entry in &report.skipped_entries {
-        println!("{entry}");
+        out!("{entry}");
     }
     for item in &report.items {
         match &item.outcome {
@@ -86,21 +106,21 @@ fn print_import(report: &ImportReport) {
                 } else {
                     "wallpapers"
                 };
-                println!("{verb} {} as {slug} ({wallpapers} {noun})", item.name);
+                out!("{verb} {} as {slug} ({wallpapers} {noun})", item.name);
             }
-            ImportOutcome::Skipped(reason) => println!("Skipped {}: {reason}", item.name),
+            ImportOutcome::Skipped(reason) => out!("Skipped {}: {reason}", item.name),
         }
         for rejected in &item.rejected {
-            println!("  {rejected}");
+            out!("  {rejected}");
         }
         for entry in &item.skipped_entries {
-            println!("  {entry}");
+            out!("  {entry}");
         }
         for warning in &item.warnings {
-            println!("  {warning}");
+            out!("  {warning}");
         }
     }
-    println!(
+    out!(
         "{} of {} themes imported.",
         report.imported(),
         report.items.len()
@@ -129,7 +149,7 @@ fn main() -> ExitCode {
     match run(command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            err!("{error}");
             ExitCode::from(1)
         }
     }
@@ -154,6 +174,15 @@ mod tests {
             parse(&args(&["import", "--replace", "C:\\themes"])),
             Some(Command::Import { replace: true, .. })
         ));
+    }
+
+    #[test]
+    fn control_characters_are_escaped_before_printing() {
+        assert_eq!(
+            printable("Evil\u{1b}]52;c;AAAA\u{7} thème"),
+            "Evil\\u{1b}]52;c;AAAA\\u{7} thème"
+        );
+        assert_eq!(printable("Tokyo Night"), "Tokyo Night");
     }
 
     #[test]

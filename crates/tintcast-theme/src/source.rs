@@ -393,9 +393,16 @@ fn settings(bytes: Option<&[u8]>, warnings: &mut Vec<String>) -> Result<Settings
                 .map(str::trim)
                 .ok_or_else(|| invalid(&key, "must be text"))
         };
+        let label = || {
+            let value = text()?;
+            if value.chars().any(char::is_control) {
+                return Err(invalid(&key, "must not contain control characters"));
+            }
+            Ok(Some(value.to_owned()).filter(|v| !v.is_empty()))
+        };
         match key.as_str() {
-            "name" => settings.name = Some(text()?.to_owned()).filter(|n| !n.is_empty()),
-            "author" => settings.author = Some(text()?.to_owned()).filter(|a| !a.is_empty()),
+            "name" => settings.name = label()?,
+            "author" => settings.author = label()?,
             "position" => {
                 let wanted = text()?;
                 settings.position = WallpaperPosition::ALL
@@ -565,6 +572,14 @@ mod tests {
         assert_eq!(default.position, WallpaperPosition::Fill);
         theme.settings = Some(b"position = \"zoom\"\n".to_vec());
         assert!(parse("t", &theme).is_err());
+        for key in ["name", "author"] {
+            theme.settings =
+                Some(format!("{key} = \"Evil\\u001b]52;c;AAAA\\u0007\"\n").into_bytes());
+            assert_eq!(
+                parse("t", &theme).unwrap_err().to_string(),
+                format!("tintcast.toml: {key} must not contain control characters.")
+            );
+        }
     }
 
     #[test]
