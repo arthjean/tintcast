@@ -2,13 +2,21 @@
 
 Tintcast gives the Windows desktop, terminals, and code editors one theme in one step: wallpaper, light or dark, accent color, Windows Terminal, VS Code, Neovim, and more. It shows every change first and can put the original setup back. It is written in Rust, with Zed's GPUI for the interface and `windows-rs` for the system.
 
-The repository is in phase 0: `spike/` holds throwaway probes that answer whether each system call works. Product code starts in `crates/` in phase 1.
+Phase 1 product code lives in `crates/`, and dependencies point one way: `tintcast-theme` ← `tintcast-engine` ← `tintcast-windows` ← `tintcast-cli` (binary `tintcast`) and `tintcast-app` (binary `tintcast-app`). `spike/` keeps the phase 0 probes and their evidence; leave it unchanged.
+
+## Engine
+
+- Every system change is an `Operation` that an `Integration` plans and the engine runs. Calling `SystemServices` from elsewhere breaks the ledger, Undo, and the three-way Restore.
+- Engine logic is tested against `tintcast_engine::fake::FakeServices`, with `DataDir::at` on a temporary folder and a unique `EngineLock` name per test. Each file directly under `crates/*/tests/` starts with `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`, because `clippy.toml` does not exempt test helpers.
+- The data folder files (`ledger.json`, `history.json`, `journal\<run-id>.json`) carry `"version": 1` and are replaced only through `write_atomic`. File backups are stored once, by SHA-256, in `backups\`.
+- Before each write, the ledger entry's `pending` records the value about to be written, so Restore, Roll back, and Keep still recognize Tintcast's write when a crash lands between the write and the ledger update.
 
 ## Gates
 
 ```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`. `CARGO_TARGET_DIR` points at a shared `C:\dev\.cargo-target`, so binaries land there, not in `target/`.
