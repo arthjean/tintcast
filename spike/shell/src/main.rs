@@ -50,19 +50,19 @@ impl Shell {
         let mut shortcuts = vec![
             Shortcut {
                 label: "Switcher",
-                keys: "Win + Ctrl + Shift + Space",
+                keys: "Win + Ctrl + Alt + Space",
                 hotkey: HotKey::new(
-                    Some(Modifiers::META | Modifiers::CONTROL | Modifiers::SHIFT),
+                    Some(Modifiers::META | Modifiers::CONTROL | Modifiers::ALT),
                     Code::Space,
                 ),
                 status: Err("not registered".into()),
             },
             Shortcut {
                 label: "Next background",
-                keys: "Win + Ctrl + Alt + Space",
+                keys: "Win + Ctrl + Alt + B",
                 hotkey: HotKey::new(
                     Some(Modifiers::META | Modifiers::CONTROL | Modifiers::ALT),
-                    Code::Space,
+                    Code::KeyB,
                 ),
                 status: Err("not registered".into()),
             },

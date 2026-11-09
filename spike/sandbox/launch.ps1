@@ -1,4 +1,4 @@
-param([switch]$NoBuild, [string]$Runner = 'run-tests.ps1', [int]$TimeoutMinutes = 12)
+param([switch]$NoBuild, [string]$Runner = 'run-tests.ps1', [string]$Assets = '', [int]$TimeoutMinutes = 12)
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -16,6 +16,18 @@ New-Item -ItemType Directory -Force -Path (Join-Path $run 'results') | Out-Null
 Copy-Item (Join-Path $target 'release\tintcast-probe.exe') $run
 Copy-Item (Join-Path $PSScriptRoot $Runner) $run
 
+$assetFolder = ''
+if ($Assets) {
+    $assetPath = (Resolve-Path $Assets).Path
+    $assetFolder = @"
+    <MappedFolder>
+      <HostFolder>$assetPath</HostFolder>
+      <SandboxFolder>C:\assets</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+"@
+}
+
 $config = @"
 <Configuration>
   <Networking>Disable</Networking>
@@ -25,6 +37,7 @@ $config = @"
       <SandboxFolder>C:\tintcast</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>
+$assetFolder
   </MappedFolders>
   <LogonCommand>
     <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\tintcast\$Runner</Command>

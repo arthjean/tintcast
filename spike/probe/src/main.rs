@@ -774,7 +774,9 @@ fn hotkeys() {
     };
     let space = 0x20;
     let t = 0x54;
-    let combos: [(&str, HOT_KEY_MODIFIERS, u32); 8] = [
+    let b = 0x42;
+    let n = 0x4e;
+    let combos: &[(&str, HOT_KEY_MODIFIERS, u32)] = &[
         (
             "Win+Ctrl+Shift+Space",
             MOD_WIN | MOD_CONTROL | MOD_SHIFT,
@@ -791,8 +793,17 @@ fn hotkeys() {
         ),
         ("Win+Ctrl+Shift+T", MOD_WIN | MOD_CONTROL | MOD_SHIFT, t),
         ("Win+Alt+T", MOD_WIN | MOD_ALT, t),
+        ("Win+Ctrl+Space", MOD_WIN | MOD_CONTROL, space),
+        (
+            "Win+Ctrl+Alt+Shift+Space",
+            MOD_WIN | MOD_CONTROL | MOD_ALT | MOD_SHIFT,
+            space,
+        ),
+        ("Win+Ctrl+Alt+B", MOD_WIN | MOD_CONTROL | MOD_ALT, b),
+        ("Win+Ctrl+Alt+N", MOD_WIN | MOD_CONTROL | MOD_ALT, n),
+        ("Win+Alt+B", MOD_WIN | MOD_ALT, b),
     ];
-    for (index, (name, modifiers, key)) in combos.into_iter().enumerate() {
+    for (index, &(name, modifiers, key)) in combos.iter().enumerate() {
         let id = 0x7000 + i32::try_from(index).unwrap_or_default();
         match unsafe { RegisterHotKey(None, id, modifiers | MOD_NOREPEAT, key) } {
             Ok(()) => {

@@ -15,7 +15,7 @@ The toolchain is pinned in `rust-toolchain.toml`. `CARGO_TARGET_DIR` points at a
 
 ## Rules
 
-- Never change the user's live setup from the host: wallpaper, registry values, the Windows theme, or any app's settings. System changes run in Windows Sandbox through `spike/sandbox/launch.ps1`, which opens a Sandbox window for a few minutes. `tintcast-probe report` only reads, so it is safe on the host.
+- Never change the user's live setup from the host: wallpaper, registry values, the Windows theme, or any app's settings. System changes run in Windows Sandbox through `spike/sandbox/launch.ps1`, which opens a Sandbox window for a few minutes. `tintcast-probe report` only reads, so it is safe on the host. The Windows Terminal test needs `spike/sandbox/fetch-terminal.ps1` once, then `launch.ps1 -Runner run-terminal.ps1 -Assets spike/sandbox/cache/terminal-<version>`.
 - Do not comment code.
 - Commit and push only when the user asks.
 
@@ -28,7 +28,8 @@ GPUI comes from Zed's git repository at the commit Paneflow uses (`37faef8`), wi
 - `IThemeManager2` (CLSID `9324da94-50ec-4a14-a770-e90ca03e7c8f`) applies a `.theme` file, which carries the accent color and the light or dark mode. Its layout comes from namazso's SecureUxTheme (GPL-3.0-or-later) and Auto Dark Mode. It must run on an STA thread.
 - `uxtheme.dll` exports `GetUserColorPreference` by name on build 26300, but not `SetUserColorPreference`.
 - Restore through recorded registry values and wallpaper paths, never through `IThemeManager2`: its "Unsaved theme" entry follows the current state. See `spike/FINDINGS.md`.
-- Win + Ctrl + Shift + Space, Omarchy's theme key, is reserved by Windows.
+- Win + Ctrl + Shift + Space, Omarchy's theme key, is reserved by Windows. Tintcast's defaults are Win + Ctrl + Alt + Space for the switcher and Win + Ctrl + Alt + B for the next background.
+- Windows Terminal reloads only when its `settings.json` changes, never on a fragment change alone.
 
 ## Scene
 
