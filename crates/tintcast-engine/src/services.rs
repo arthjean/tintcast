@@ -9,7 +9,10 @@ use tintcast_theme::WallpaperPosition;
 pub enum RegistryValue {
     Dword(u32),
     Binary(#[serde(with = "hex_bytes")] Vec<u8>),
+    String(String),
 }
+
+pub const DISPLAY_NOT_CONNECTED: &str = "Display not connected";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
@@ -23,10 +26,50 @@ impl SystemError {
 
 pub type SystemResult<T> = Result<T, SystemError>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryChange {
+    pub key: String,
+    pub name: String,
+    pub value: Option<RegistryValue>,
+}
+
+impl RegistryChange {
+    pub fn set(key: &str, name: &str, value: RegistryValue) -> Self {
+        Self {
+            key: key.to_owned(),
+            name: name.to_owned(),
+            value: Some(value),
+        }
+    }
+
+    pub fn delete(key: &str, name: &str) -> Self {
+        Self {
+            key: key.to_owned(),
+            name: name.to_owned(),
+            value: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{error}")]
+pub struct CommitError {
+    pub index: Option<usize>,
+    pub error: SystemError,
+}
+
+impl CommitError {
+    pub fn at(index: usize, error: SystemError) -> Self {
+        Self {
+            index: Some(index),
+            error,
+        }
+    }
+}
+
 pub trait SystemServices: Send + Sync {
     fn read_registry(&self, key: &str, name: &str) -> SystemResult<Option<RegistryValue>>;
-    fn write_registry(&self, key: &str, name: &str, value: &RegistryValue) -> SystemResult<()>;
-    fn delete_registry(&self, key: &str, name: &str) -> SystemResult<()>;
+    fn commit_registry(&self, changes: &[RegistryChange]) -> Result<(), CommitError>;
 
     fn monitors(&self) -> SystemResult<Vec<String>>;
     fn wallpaper(&self, monitor: &str) -> SystemResult<Option<PathBuf>>;
@@ -80,6 +123,14 @@ mod tests {
         let value = RegistryValue::Binary(vec![0x00, 0x7f, 0xff, 0x10]);
         let text = serde_json::to_string(&value).unwrap();
         assert_eq!(text, r#"{"type":"binary","data":"007fff10"}"#);
+        assert_eq!(serde_json::from_str::<RegistryValue>(&text).unwrap(), value);
+    }
+
+    #[test]
+    fn string_values_round_trip() {
+        let value = RegistryValue::String("30 30 30".into());
+        let text = serde_json::to_string(&value).unwrap();
+        assert_eq!(text, r#"{"type":"string","data":"30 30 30"}"#);
         assert_eq!(serde_json::from_str::<RegistryValue>(&text).unwrap(), value);
     }
 

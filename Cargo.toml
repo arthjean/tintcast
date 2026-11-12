@@ -40,6 +40,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 toml = "1.2.1"
 windows = "0.62.2"
+windows-registry = "0.6.1"
 
 [profile.dev.package.tintcast-theme]
 opt-level = 3

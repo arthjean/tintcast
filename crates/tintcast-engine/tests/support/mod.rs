@@ -7,8 +7,9 @@ use std::time::{Duration, SystemTime};
 
 use tintcast_engine::fake::FakeServices;
 use tintcast_engine::{
-    ApplyRequest, DataDir, Detection, Engine, EngineLock, Integration, Operation, Palette, Plan,
-    RegistryValue, ReloadResult, Rgba, SystemResult, SystemServices, Theme, WallpaperPosition,
+    ApplyRequest, CommitError, DataDir, Detection, Engine, EngineLock, Integration, Operation,
+    Palette, Plan, RegistryChange, RegistryValue, ReloadResult, Rgba, SystemResult, SystemServices,
+    Theme, WallpaperPosition,
 };
 
 pub const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
@@ -227,16 +228,21 @@ impl SystemServices for Hooked {
         self.inner.read_registry(key, name)
     }
 
-    fn write_registry(&self, key: &str, name: &str, value: &RegistryValue) -> SystemResult<()> {
-        self.write(format!(r"reg:HKCU\{key}\{name}"), || {
-            self.inner.write_registry(key, name, value)
-        })
-    }
-
-    fn delete_registry(&self, key: &str, name: &str) -> SystemResult<()> {
-        self.write(format!(r"reg:HKCU\{key}\{name}"), || {
-            self.inner.delete_registry(key, name)
-        })
+    fn commit_registry(&self, changes: &[RegistryChange]) -> Result<(), CommitError> {
+        let resources: Vec<_> = changes
+            .iter()
+            .map(|c| format!(r"reg:HKCU\{}\{}", c.key, c.name))
+            .collect();
+        for resource in &resources {
+            (self.before_write)(resource);
+        }
+        let result = self.inner.commit_registry(changes);
+        if let Some(after) = &self.after_write {
+            for resource in &resources {
+                after(resource);
+            }
+        }
+        result
     }
 
     fn monitors(&self) -> SystemResult<Vec<String>> {

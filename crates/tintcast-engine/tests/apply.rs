@@ -23,6 +23,8 @@ fn ledger_on_disk(data: &tintcast_engine::DataDir) -> Vec<LedgerEntry> {
 
 type Snapshot = Vec<(String, StepState)>;
 
+type Observed = (String, Vec<StepState>);
+
 fn owns(resource: &str, write_target: &str) -> bool {
     resource == write_target
         || write_target
@@ -106,8 +108,10 @@ fn originals_and_file_bytes_are_recorded_and_each_step_journaled_before_its_writ
             assert!(watched.backups().join(sha).exists());
         }
         let steps = journal_steps_on_disk(&watched);
-        let (last, state) = steps.last().unwrap();
-        assert!(owns(last, resource), "{resource} is the newest step");
+        let (_, state) = steps
+            .iter()
+            .find(|(step, _)| owns(step, resource))
+            .unwrap_or_else(|| panic!("{resource} is not journaled before its write"));
         assert_eq!(
             *state,
             StepState::Pending,
@@ -163,30 +167,116 @@ fn originals_and_file_bytes_are_recorded_and_each_step_journaled_before_its_writ
 }
 
 #[test]
-fn each_step_is_journaled_as_pending_then_applied() {
+fn each_step_is_journaled_as_pending_then_applied_and_registry_runs_commit_together() {
     let (_temp, data) = data_dir();
     let fake = Arc::new(FakeServices::with_monitors(&["one"]));
-    let states: Arc<Mutex<Vec<Snapshot>>> = Arc::default();
+    let states: Arc<Mutex<Vec<Observed>>> = Arc::default();
     let seen = states.clone();
     let watched = data.clone();
-    let services = Arc::new(Hooked::before(fake, move |_| {
-        seen.lock().unwrap().push(journal_steps_on_disk(&watched))
+    let services = Arc::new(Hooked::before(fake, move |resource| {
+        let steps = journal_steps_on_disk(&watched);
+        seen.lock().unwrap().push((
+            resource.to_owned(),
+            steps.into_iter().map(|(_, s)| s).collect(),
+        ));
     }));
-    let integrations: Vec<Box<dyn Integration>> = vec![Box::new(system_integration())];
+    let integrations: Vec<Box<dyn Integration>> = vec![Box::new(Scripted::new(
+        "system",
+        "Mode and accent",
+        |request, _| {
+            let theme = &request.theme;
+            Ok(Plan::changes(vec![
+                dword(PERSONALIZE, "AppsUseLightTheme", light(theme)),
+                dword(PERSONALIZE, "SystemUsesLightTheme", light(theme)),
+                Operation::SetWallpaperPosition {
+                    position: tintcast_engine::WallpaperPosition::Fill,
+                },
+                dword(ACCENT, "AccentColorMenu", shade(theme)),
+            ]))
+        },
+    ))];
     let engine = Engine::new(data.clone(), services, integrations).with_lock(unique_lock());
 
     engine.apply(&ApplyRequest::new(moondust())).unwrap();
 
+    use StepState::{Applied, Pending};
     let states = states.lock().unwrap();
-    assert_eq!(states.len(), 4);
-    for (index, snapshot) in states.iter().enumerate() {
-        assert_eq!(snapshot.len(), index + 1);
-        for (_, state) in &snapshot[..index] {
-            assert_eq!(*state, StepState::Applied);
-        }
-        assert_eq!(snapshot[index].1, StepState::Pending);
-    }
+    assert_eq!(
+        *states,
+        [
+            (
+                format!(r"reg:HKCU\{PERSONALIZE}\AppsUseLightTheme"),
+                vec![Pending, Pending]
+            ),
+            (
+                format!(r"reg:HKCU\{PERSONALIZE}\SystemUsesLightTheme"),
+                vec![Pending, Pending]
+            ),
+            (
+                "wallpaper-position".to_owned(),
+                vec![Applied, Applied, Pending]
+            ),
+            (
+                format!(r"reg:HKCU\{ACCENT}\AccentColorMenu"),
+                vec![Applied, Applied, Applied, Pending]
+            ),
+        ]
+    );
     assert!(journal_files(&data).is_empty());
+}
+
+fn one_value(id: &str, key: &'static str, name: &'static str) -> Box<dyn Integration> {
+    Box::new(Scripted::new(id, name, move |request, _| {
+        Ok(Plan::changes(vec![dword(key, name, shade(&request.theme))]))
+    }))
+}
+
+#[test]
+fn originals_come_from_before_the_first_write_even_when_windows_mirrors_one_value_into_another() {
+    let together: Vec<Box<dyn Integration>> = vec![Box::new(system_integration())];
+    let apart = vec![
+        one_value("menu", ACCENT, "AccentColorMenu"),
+        one_value("dwm", DWM, "AccentColor"),
+    ];
+    for integrations in [together, apart] {
+        let f = fixture(integrations);
+        seed_user_setup(&f.fake);
+        f.fake.set_registry(
+            DWM,
+            "AccentColor",
+            Some(RegistryValue::Dword(0x00_d7_78_00)),
+        );
+        f.fake.on_commit(|registry| {
+            let menu = registry
+                .get(&(ACCENT.to_owned(), "AccentColorMenu".to_owned()))
+                .cloned();
+            if let Some(menu) = menu {
+                registry.insert((DWM.to_owned(), "AccentColor".to_owned()), menu);
+            }
+        });
+
+        f.engine.apply(&ApplyRequest::new(moondust())).unwrap();
+
+        let dwm = f
+            .engine
+            .ledger_entries()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.resource == format!(r"reg:HKCU\{DWM}\AccentColor"))
+            .unwrap();
+        assert_eq!(
+            dwm.original,
+            ResourceState::Registry {
+                value: RegistryValue::Dword(0x00_d7_78_00)
+            },
+            "the ledger keeps the user's value, not Windows' copy of the new accent"
+        );
+        f.engine.restore().unwrap();
+        assert_eq!(
+            f.fake.registry(DWM, "AccentColor"),
+            Some(RegistryValue::Dword(0x00_d7_78_00))
+        );
+    }
 }
 
 #[test]
@@ -250,9 +340,8 @@ fn a_failed_third_operation_rolls_back_its_integration_alone() {
             format!(r"{PERSONALIZE}\AppsUseLightTheme"),
             format!(r"{PERSONALIZE}\SystemUsesLightTheme"),
             format!(r"{ACCENT}\AccentColorMenu"),
-            format!(r"{PERSONALIZE}\SystemUsesLightTheme"),
-            format!(r"{PERSONALIZE}\AppsUseLightTheme"),
-        ]
+        ],
+        "the transaction stops at the denied value, so nothing lands and nothing needs writing back"
     );
     let ledger = f.engine.ledger_entries().unwrap();
     assert!(ledger.iter().all(|e| e.integration == "wallpaper"));

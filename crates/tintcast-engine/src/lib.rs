@@ -25,7 +25,10 @@ pub use library::{
 };
 pub use lock::{EngineLock, LockGuard};
 pub use operation::{Operation, ResourceState, sha256_hex};
-pub use services::{RegistryValue, SystemError, SystemResult, SystemServices};
+pub use services::{
+    CommitError, DISPLAY_NOT_CONNECTED, RegistryChange, RegistryValue, SystemError, SystemResult,
+    SystemServices,
+};
 pub use store::{
     AppliedValue, HistoryEntry, JournalRun, JournalStep, LedgerEntry, StepState, VERSION,
 };

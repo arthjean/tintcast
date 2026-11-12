@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +12,7 @@ use crate::integration::{ApplyRequest, Detection, Integration, Plan, ReloadResul
 use crate::jsonc;
 use crate::lock::EngineLock;
 use crate::operation::{Operation, ResourceState, sha256_hex};
-use crate::services::SystemServices;
+use crate::services::{CommitError, DISPLAY_NOT_CONNECTED, RegistryChange, SystemServices};
 use crate::store::{
     AppliedValue, HistoryEntry, JournalRun, JournalStep, Ledger, LedgerEntry, StepState, Store,
     VERSION,
@@ -138,6 +139,9 @@ impl RestoreResult {
             Self::Restored => "Restored".to_owned(),
             Self::Unchanged => "Unchanged".to_owned(),
             Self::KeptYourChange => "Kept your change".to_owned(),
+            Self::Failed(error) if error == DISPLAY_NOT_CONNECTED => {
+                format!("{DISPLAY_NOT_CONNECTED}: its wallpaper will be restored when it's back.")
+            }
             Self::Failed(error) => format!("Could not restore: {error}"),
         }
     }
@@ -239,7 +243,53 @@ struct Done {
     step: usize,
 }
 
-type StepFailure = (String, String);
+type StepFailure = (Option<String>, String);
+
+type Snapshot = BTreeMap<String, Result<ResourceState, String>>;
+
+struct Prepared {
+    resource: String,
+    before: ResourceState,
+    before_bytes: Option<Option<Vec<u8>>>,
+    file_backup: Option<String>,
+    previous: Option<LedgerEntry>,
+}
+
+struct Reversal<'a> {
+    integration: &'a str,
+    op: &'a Operation,
+    current: &'a ResourceState,
+    target: &'a ResourceState,
+    file_backup: Option<&'a str>,
+    before_bytes: Option<&'a Option<Vec<u8>>>,
+}
+
+impl Reversal<'_> {
+    fn registry_change(&self) -> Option<RegistryChange> {
+        self.op.registry_change(self.target)
+    }
+}
+
+enum Decision {
+    Settled(RestoreResult),
+    Reverse(usize),
+}
+
+impl Decision {
+    fn settle(self, outcomes: &[Result<(), String>]) -> RestoreResult {
+        match self {
+            Self::Settled(result) => result,
+            Self::Reverse(index) => match &outcomes[index] {
+                Ok(()) => RestoreResult::Restored,
+                Err(error) => RestoreResult::Failed(error.clone()),
+            },
+        }
+    }
+}
+
+fn is_registry(op: &Operation) -> bool {
+    matches!(op, Operation::SetRegistryValue { .. })
+}
 
 pub struct Engine {
     store: Store,
@@ -369,6 +419,7 @@ impl Engine {
     ) -> Result<ApplyReport, EngineError> {
         let mut ledger = self.store.load_ledger()?;
         let planned = self.plan(request);
+        let snapshot = self.snapshot(&planned);
         let mut run = JournalRun {
             version: VERSION,
             run_id: new_run_id(),
@@ -392,6 +443,7 @@ impl Engine {
                         integration,
                         operations,
                         notes,
+                        &snapshot,
                         &mut applied,
                     )
                 }
@@ -448,6 +500,19 @@ impl Engine {
         })
     }
 
+    fn snapshot(&self, planned: &[PlannedIntegration]) -> Snapshot {
+        planned
+            .iter()
+            .filter_map(|item| match &item.outcome {
+                PlannedOutcome::Changes { operations, .. } => Some(operations),
+                _ => None,
+            })
+            .flatten()
+            .map(|op| (op.resource(), self.state_of(op)))
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn apply_integration(
         &self,
         ledger: &mut Ledger,
@@ -455,13 +520,14 @@ impl Engine {
         integration: &dyn Integration,
         operations: &[Operation],
         notes: &[String],
+        snapshot: &Snapshot,
         applied: &mut Vec<AppliedValue>,
     ) -> IntegrationResult {
         let mut done: Vec<Done> = Vec::new();
         let mut failure = None;
-        for op in operations {
-            match self.apply_one(ledger, run, integration.id(), op) {
-                Ok(step) => done.push(step),
+        for group in operations.chunk_by(|a, b| is_registry(a) && is_registry(b)) {
+            match self.apply_group(ledger, run, integration.id(), group, snapshot) {
+                Ok(steps) => done.extend(steps),
                 Err(error) => {
                     failure = Some(error);
                     break;
@@ -471,12 +537,12 @@ impl Engine {
         let summaries = operations.iter().map(Operation::summary).collect();
         let mut notes = notes.to_vec();
         if let Some((operation, error)) = failure {
-            let rollback_errors = self.roll_back_done(ledger, run, &done);
+            let rollback_errors = self.roll_back_done(ledger, run, integration.id(), &done);
             return IntegrationResult {
                 id: integration.id().to_owned(),
                 name: integration.name().to_owned(),
                 outcome: Outcome::Failed {
-                    operation: Some(operation),
+                    operation,
                     error,
                     rollback_errors,
                 },
@@ -507,125 +573,215 @@ impl Engine {
         }
     }
 
-    fn apply_one(
+    fn prepare(
+        &self,
+        ledger: &Ledger,
+        op: &Operation,
+        snapshot: &Snapshot,
+    ) -> Result<Prepared, String> {
+        let resource = op.resource();
+        let before = match snapshot.get(&resource) {
+            Some(state) => state.clone()?,
+            None => self.state_of(op)?,
+        };
+        let before_bytes = match op.file_path() {
+            Some(path) => Some(self.services.read_file(path).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        let file_backup = match &before_bytes {
+            Some(Some(bytes)) => Some(self.store.backup(bytes).map_err(|e| e.to_string())?),
+            _ => None,
+        };
+        Ok(Prepared {
+            previous: ledger.get(&resource).cloned(),
+            resource,
+            before,
+            before_bytes,
+            file_backup,
+        })
+    }
+
+    fn apply_group(
         &self,
         ledger: &mut Ledger,
         run: &mut JournalRun,
         integration: &str,
-        op: &Operation,
-    ) -> Result<Done, StepFailure> {
-        let summary = op.summary();
-        let fail = |error: String| (summary.clone(), error);
-        let resource = op.resource();
-        let before = self.state_of(op).map_err(fail)?;
-        let before_bytes = match op.file_path() {
-            Some(path) => Some(
-                self.services
-                    .read_file(path)
-                    .map_err(|e| fail(e.to_string()))?,
-            ),
-            None => None,
-        };
-        let file_backup = match &before_bytes {
-            Some(Some(bytes)) => Some(self.store.backup(bytes).map_err(|e| fail(e.to_string()))?),
-            _ => None,
-        };
-        let first_touch = !ledger.contains(&resource);
-        let previous = ledger.get(&resource).cloned();
-        let put_back = |ledger: &mut Ledger| match &previous {
-            Some(previous) => ledger.insert(previous.clone()),
-            None => {
-                ledger.remove(&resource);
+        group: &[Operation],
+        snapshot: &Snapshot,
+    ) -> Result<Vec<Done>, StepFailure> {
+        let mut prepared = Vec::with_capacity(group.len());
+        for op in group {
+            let item = self
+                .prepare(ledger, op, snapshot)
+                .map_err(|error| (Some(op.summary()), error))?;
+            prepared.push(item);
+        }
+        let first_summary = group.first().map(Operation::summary);
+        let put_back = |ledger: &mut Ledger| {
+            for item in prepared.iter().rev() {
+                match &item.previous {
+                    Some(previous) => ledger.insert(previous.clone()),
+                    None => {
+                        ledger.remove(&item.resource);
+                    }
+                }
             }
         };
-        let target = op.target_state();
-        match ledger.get_mut(&resource) {
-            Some(entry) => entry.pending = Some(target),
-            None => {
-                let now = Timestamp::now();
-                ledger.insert(LedgerEntry {
+        let now = Timestamp::now();
+        for (op, item) in group.iter().zip(&prepared) {
+            let target = op.target_state();
+            match ledger.get_mut(&item.resource) {
+                Some(entry) => entry.pending = Some(target),
+                None => ledger.insert(LedgerEntry {
                     sequence: ledger.next_sequence(),
-                    resource: resource.clone(),
+                    resource: item.resource.clone(),
                     integration: integration.to_owned(),
                     operation: op.clone(),
-                    original: before.clone(),
-                    applied: before.clone(),
+                    original: item.before.clone(),
+                    applied: item.before.clone(),
                     pending: Some(target),
-                    file_backup: file_backup.clone(),
+                    file_backup: item.file_backup.clone(),
                     first_touched: now,
                     last_applied: now,
                     error: None,
-                });
+                }),
             }
         }
         if let Err(error) = self.store.save_ledger(ledger) {
             put_back(ledger);
-            return Err(fail(error.to_string()));
+            return Err((first_summary, error.to_string()));
         }
         let abandon = |ledger: &mut Ledger| {
             put_back(ledger);
             let _ = self.store.save_ledger(ledger);
         };
-        run.steps.push(JournalStep {
-            integration: integration.to_owned(),
-            resource: resource.clone(),
-            summary: summary.clone(),
-            operation: op.clone(),
-            before: before.clone(),
-            file_backup,
-            state: StepState::Pending,
-        });
-        let step = run.steps.len() - 1;
-        if let Err(error) = self.store.save_journal(run) {
-            run.steps[step].state = StepState::Failed;
-            abandon(ledger);
-            return Err(fail(error.to_string()));
+        let first_step = run.steps.len();
+        for (op, item) in group.iter().zip(&prepared) {
+            run.steps.push(JournalStep {
+                integration: integration.to_owned(),
+                resource: item.resource.clone(),
+                summary: op.summary(),
+                operation: op.clone(),
+                before: item.before.clone(),
+                file_backup: item.file_backup.clone(),
+                state: StepState::Pending,
+            });
         }
-        let applied = match self.execute(op) {
-            Ok(applied) => applied,
-            Err(error) => {
-                run.steps[step].state = StepState::Failed;
-                let _ = self.store.save_journal(run);
-                abandon(ledger);
-                return Err(fail(error));
+        let mark = |run: &mut JournalRun, state: StepState| {
+            for step in &mut run.steps[first_step..] {
+                step.state = state;
             }
         };
-        if let Some(entry) = ledger.get_mut(&resource) {
-            entry.applied = applied.clone();
-            entry.pending = None;
-            entry.operation = op.clone();
-            entry.integration = integration.to_owned();
-            entry.last_applied = Timestamp::now();
-            entry.error = None;
+        if let Err(error) = self.store.save_journal(run) {
+            mark(run, StepState::Failed);
+            abandon(ledger);
+            return Err((first_summary, error.to_string()));
+        }
+        let applied = match self.execute_group(group) {
+            Ok(applied) => applied,
+            Err((index, error)) => {
+                mark(run, StepState::Failed);
+                let _ = self.store.save_journal(run);
+                abandon(ledger);
+                let operation = index.and_then(|i| group.get(i)).map(Operation::summary);
+                return Err((operation, error));
+            }
+        };
+        let now = Timestamp::now();
+        for ((op, item), state) in group.iter().zip(&prepared).zip(&applied) {
+            if let Some(entry) = ledger.get_mut(&item.resource) {
+                entry.applied = state.clone();
+                entry.pending = None;
+                entry.operation = op.clone();
+                entry.integration = integration.to_owned();
+                entry.last_applied = now;
+                entry.error = None;
+            }
         }
         if let Err(error) = self.store.save_ledger(ledger) {
-            let _ = self.revert(op, &before, before_bytes.as_ref());
+            let reversals: Vec<_> = group
+                .iter()
+                .zip(&prepared)
+                .zip(&applied)
+                .rev()
+                .map(|((op, item), state)| Reversal {
+                    integration,
+                    op,
+                    current: state,
+                    target: &item.before,
+                    file_backup: None,
+                    before_bytes: item.before_bytes.as_ref(),
+                })
+                .collect();
+            let _ = self.reverse(&reversals);
             abandon(ledger);
-            run.steps[step].state = StepState::Failed;
+            mark(run, StepState::Failed);
             let _ = self.store.save_journal(run);
-            return Err(fail(error.to_string()));
+            return Err((first_summary, error.to_string()));
         }
-        run.steps[step].state = StepState::Applied;
+        mark(run, StepState::Applied);
         let _ = self.store.save_journal(run);
-        Ok(Done {
-            op: op.clone(),
-            applied,
-            before,
-            before_bytes,
-            first_touch,
-            step,
-        })
+        Ok(group
+            .iter()
+            .zip(prepared)
+            .zip(applied)
+            .enumerate()
+            .map(|(offset, ((op, item), applied))| Done {
+                op: op.clone(),
+                applied,
+                first_touch: item.previous.is_none(),
+                before: item.before,
+                before_bytes: item.before_bytes,
+                step: first_step + offset,
+            })
+            .collect())
+    }
+
+    fn execute_group(
+        &self,
+        group: &[Operation],
+    ) -> Result<Vec<ResourceState>, (Option<usize>, String)> {
+        let changes: Option<Vec<RegistryChange>> = group
+            .iter()
+            .map(|op| op.registry_change(&op.target_state()))
+            .collect();
+        match changes {
+            Some(changes) => self
+                .services
+                .commit_registry(&changes)
+                .map(|()| group.iter().map(Operation::target_state).collect())
+                .map_err(|error| (error.index, error.error.to_string())),
+            None => group
+                .iter()
+                .enumerate()
+                .map(|(index, op)| self.execute(op).map_err(|error| (Some(index), error)))
+                .collect(),
+        }
     }
 
     fn roll_back_done(
         &self,
         ledger: &mut Ledger,
         run: &mut JournalRun,
+        integration: &str,
         done: &[Done],
     ) -> Vec<String> {
+        let reversals: Vec<_> = done
+            .iter()
+            .rev()
+            .map(|item| Reversal {
+                integration,
+                op: &item.op,
+                current: &item.applied,
+                target: &item.before,
+                file_backup: None,
+                before_bytes: item.before_bytes.as_ref(),
+            })
+            .collect();
+        let outcomes = self.reverse(&reversals);
         let mut errors = Vec::new();
-        for item in done.iter().rev() {
-            match self.revert(&item.op, &item.before, item.before_bytes.as_ref()) {
+        for (item, outcome) in done.iter().rev().zip(outcomes) {
+            match outcome {
                 Ok(()) => {
                     let resource = item.op.resource();
                     if item.first_touch {
@@ -643,6 +799,78 @@ impl Engine {
         }
         let _ = self.store.save_journal(run);
         errors
+    }
+
+    fn reverse(&self, items: &[Reversal<'_>]) -> Vec<Result<(), String>> {
+        let mut results: Vec<Option<Result<(), String>>> = vec![None; items.len()];
+        for (index, item) in items.iter().enumerate() {
+            if results[index].is_some() {
+                continue;
+            }
+            if item.registry_change().is_none() {
+                results[index] = Some(self.reverse_one(item));
+                continue;
+            }
+            let batch: Vec<usize> = (index..items.len())
+                .filter(|&i| {
+                    items[i].integration == item.integration && items[i].registry_change().is_some()
+                })
+                .collect();
+            let members: Vec<&Reversal<'_>> = batch.iter().map(|&i| &items[i]).collect();
+            for (i, outcome) in batch.iter().zip(self.commit_reversals(&members)) {
+                results[*i] = Some(outcome);
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.unwrap_or(Ok(())))
+            .collect()
+    }
+
+    fn commit_reversals(&self, items: &[&Reversal<'_>]) -> Vec<Result<(), String>> {
+        let mut results: Vec<Option<Result<(), String>>> = vec![None; items.len()];
+        loop {
+            let open: Vec<usize> = (0..items.len()).filter(|&i| results[i].is_none()).collect();
+            let changes: Vec<RegistryChange> = open
+                .iter()
+                .filter_map(|&i| items[i].registry_change())
+                .collect();
+            match self.services.commit_registry(&changes) {
+                Ok(()) => {
+                    for i in open {
+                        results[i] = Some(Ok(()));
+                    }
+                    break;
+                }
+                Err(CommitError {
+                    index: Some(failed),
+                    error,
+                }) if failed < open.len() => {
+                    results[open[failed]] = Some(Err(error.to_string()));
+                }
+                Err(error) => {
+                    for i in open {
+                        results[i] = Some(Err(error.to_string()));
+                    }
+                    break;
+                }
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.unwrap_or(Ok(())))
+            .collect()
+    }
+
+    fn reverse_one(&self, item: &Reversal<'_>) -> Result<(), String> {
+        if let Some(bytes) = item.before_bytes {
+            return self.revert(item.op, item.target, Some(bytes));
+        }
+        if self.restore_json_bytes(item.op, item.current, item.file_backup) {
+            return Ok(());
+        }
+        self.revert(item.op, item.target, None)
+            .and_then(|()| self.tidy_json(item.op, item.target, item.file_backup))
     }
 
     fn verify_done(&self, done: &[Done]) -> Verification {
@@ -673,33 +901,43 @@ impl Engine {
 
     fn restore_locked(&self) -> Result<RestoreReport, EngineError> {
         let mut ledger = self.store.load_ledger()?;
+        let entries = ledger.newest_first();
+        let currents: Vec<_> = entries
+            .iter()
+            .map(|entry| self.state_of(&entry.operation))
+            .collect();
+        let mut reversals = Vec::new();
+        let mut decisions = Vec::with_capacity(entries.len());
+        for (entry, current) in entries.iter().zip(&currents) {
+            decisions.push(match current {
+                Err(error) => Decision::Settled(RestoreResult::Failed(error.clone())),
+                Ok(current) if *current == entry.original => {
+                    Decision::Settled(RestoreResult::Unchanged)
+                }
+                Ok(current)
+                    if *current == entry.applied || entry.pending.as_ref() == Some(current) =>
+                {
+                    reversals.push(Reversal {
+                        integration: &entry.integration,
+                        op: &entry.operation,
+                        current,
+                        target: &entry.original,
+                        file_backup: entry.file_backup.as_deref(),
+                        before_bytes: None,
+                    });
+                    Decision::Reverse(reversals.len() - 1)
+                }
+                Ok(_) => Decision::Settled(RestoreResult::KeptYourChange),
+            });
+        }
+        let outcomes = self.reverse(&reversals);
         let mut report = RestoreReport::default();
         let mut touched: Vec<String> = Vec::new();
-        for entry in ledger.newest_first() {
+        for (entry, decision) in entries.iter().zip(decisions) {
             if !touched.contains(&entry.integration) {
                 touched.push(entry.integration.clone());
             }
-            let result = match self.state_of(&entry.operation) {
-                Err(error) => RestoreResult::Failed(error),
-                Ok(current) if current == entry.original => RestoreResult::Unchanged,
-                Ok(current)
-                    if current == entry.applied || entry.pending.as_ref() == Some(&current) =>
-                {
-                    match self
-                        .revert(&entry.operation, &entry.original, None)
-                        .and_then(|()| {
-                            self.tidy_json(
-                                &entry.operation,
-                                &entry.original,
-                                entry.file_backup.as_deref(),
-                            )
-                        }) {
-                        Ok(()) => RestoreResult::Restored,
-                        Err(error) => RestoreResult::Failed(error),
-                    }
-                }
-                Ok(_) => RestoreResult::KeptYourChange,
-            };
+            let result = decision.settle(&outcomes);
             match &result {
                 RestoreResult::Failed(error) => {
                     if let Some(kept) = ledger.get_mut(&entry.resource) {
@@ -753,25 +991,41 @@ impl Engine {
         let _guard = self.lock.acquire()?;
         let run = self.store.load_journal(run_id)?;
         let mut ledger = self.store.load_ledger()?;
-        let mut items = Vec::new();
-        for step in run
+        let steps: Vec<_> = run
             .steps
             .iter()
             .rev()
             .filter(|s| matches!(s.state, StepState::Applied | StepState::Pending))
-        {
-            let result = match self.state_of(&step.operation) {
-                Err(error) => RestoreResult::Failed(error),
-                Ok(current) if current == step.before => RestoreResult::Unchanged,
-                Ok(_) => match self
-                    .revert(&step.operation, &step.before, None)
-                    .and_then(|()| {
-                        self.tidy_json(&step.operation, &step.before, step.file_backup.as_deref())
-                    }) {
-                    Ok(()) => RestoreResult::Restored,
-                    Err(error) => RestoreResult::Failed(error),
-                },
-            };
+            .collect();
+        let currents: Vec<_> = steps
+            .iter()
+            .map(|step| self.state_of(&step.operation))
+            .collect();
+        let mut reversals = Vec::new();
+        let mut decisions = Vec::with_capacity(steps.len());
+        for (step, current) in steps.iter().zip(&currents) {
+            decisions.push(match current {
+                Err(error) => Decision::Settled(RestoreResult::Failed(error.clone())),
+                Ok(current) if *current == step.before => {
+                    Decision::Settled(RestoreResult::Unchanged)
+                }
+                Ok(current) => {
+                    reversals.push(Reversal {
+                        integration: &step.integration,
+                        op: &step.operation,
+                        current,
+                        target: &step.before,
+                        file_backup: step.file_backup.as_deref(),
+                        before_bytes: None,
+                    });
+                    Decision::Reverse(reversals.len() - 1)
+                }
+            });
+        }
+        let outcomes = self.reverse(&reversals);
+        let mut items = Vec::new();
+        for (step, decision) in steps.iter().zip(decisions) {
+            let result = decision.settle(&outcomes);
             if !matches!(result, RestoreResult::Failed(_)) {
                 let original = ledger.get(&step.resource).map(|e| e.original.clone());
                 match original {
@@ -906,6 +1160,34 @@ impl Engine {
         Ok(())
     }
 
+    fn restore_json_bytes(
+        &self,
+        op: &Operation,
+        current: &ResourceState,
+        file_backup: Option<&str>,
+    ) -> bool {
+        let (Operation::SetJsonValue { path, pointer, .. }, Some(sha)) = (op, file_backup) else {
+            return false;
+        };
+        let applied = match current {
+            ResourceState::Json { value } => Some(value),
+            ResourceState::Absent => None,
+            _ => return false,
+        };
+        let Ok(backup) = self.store.read_backup(sha) else {
+            return false;
+        };
+        let (Ok(original), Ok(Some(text))) = (std::str::from_utf8(&backup), self.read_text(path))
+        else {
+            return false;
+        };
+        let edited_only_here =
+            jsonc::set(original, pointer, applied).is_ok_and(|expected| expected == text);
+        edited_only_here
+            && text.as_bytes() != backup
+            && self.services.write_file(path, &backup).is_ok()
+    }
+
     fn tidy_json(
         &self,
         op: &Operation,
@@ -960,16 +1242,13 @@ impl Engine {
     fn execute(&self, op: &Operation) -> Result<ResourceState, String> {
         let services = self.services.as_ref();
         match op {
-            Operation::SetRegistryValue {
-                key,
-                name,
-                value: Some(value),
-            } => services.write_registry(key, name, value),
-            Operation::SetRegistryValue {
-                key,
-                name,
-                value: None,
-            } => services.delete_registry(key, name),
+            Operation::SetRegistryValue { .. } => {
+                let change = op.registry_change(&op.target_state());
+                return services
+                    .commit_registry(change.as_slice())
+                    .map(|()| op.target_state())
+                    .map_err(|e| e.to_string());
+            }
             Operation::SetWallpaper { monitor, image } => {
                 services.set_wallpaper(monitor, Some(image))
             }
@@ -1005,13 +1284,12 @@ impl Engine {
                 None => services.delete_file(path),
             });
         }
+        if let Some(change) = op.registry_change(target) {
+            return services
+                .commit_registry(&[change])
+                .map_err(|e| e.to_string());
+        }
         match (op, target) {
-            (Operation::SetRegistryValue { key, name, .. }, ResourceState::Registry { value }) => {
-                system(services.write_registry(key, name, value))
-            }
-            (Operation::SetRegistryValue { key, name, .. }, ResourceState::Absent) => {
-                system(services.delete_registry(key, name))
-            }
             (Operation::SetWallpaper { monitor, .. }, ResourceState::Wallpaper { image }) => {
                 system(services.set_wallpaper(monitor, Some(image)))
             }

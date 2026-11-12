@@ -9,20 +9,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use support::*;
 use tintcast_engine::fake::FakeServices;
 use tintcast_engine::{
-    ApplyRequest, Engine, EngineError, Integration, Plan, RegistryValue, RestoreResult,
+    ApplyRequest, Engine, EngineError, Integration, Plan, RegistryValue, RestoreResult, StepState,
+    Theme,
 };
 
-fn five_steps() -> Scripted {
-    Scripted::new("system", "Mode and accent", |request, _| {
-        let theme = &request.theme;
-        Ok(Plan::changes(vec![
-            dword(PERSONALIZE, "AppsUseLightTheme", light(theme)),
-            dword(PERSONALIZE, "SystemUsesLightTheme", light(theme)),
-            dword(ACCENT, "AccentColorMenu", shade(theme)),
-            dword(ACCENT, "StartColorMenu", shade(theme)),
-            dword(DWM, "AccentColor", shade(theme)),
-        ]))
-    })
+fn step(
+    id: &str,
+    key: &'static str,
+    name: &'static str,
+    value: fn(&Theme) -> u32,
+) -> Box<dyn Integration> {
+    Box::new(Scripted::new(id, name, move |request, _| {
+        Ok(Plan::changes(vec![dword(key, name, value(&request.theme))]))
+    }))
+}
+
+fn five_steps() -> Vec<Box<dyn Integration>> {
+    vec![
+        step("apps", PERSONALIZE, "AppsUseLightTheme", light),
+        step("system", PERSONALIZE, "SystemUsesLightTheme", light),
+        step("menu", ACCENT, "AccentColorMenu", shade),
+        step("start", ACCENT, "StartColorMenu", shade),
+        step("dwm", DWM, "AccentColor", shade),
+    ]
 }
 
 fn crash_after(
@@ -37,8 +46,7 @@ fn crash_after(
             panic!("power lost before writing {resource}");
         }
     }));
-    let integrations: Vec<Box<dyn Integration>> = vec![Box::new(five_steps())];
-    let engine = Engine::new(data.clone(), services, integrations).with_lock(lock.clone());
+    let engine = Engine::new(data.clone(), services, five_steps()).with_lock(lock.clone());
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         engine.apply(&ApplyRequest::new(moondust()))
     }));
@@ -50,8 +58,7 @@ fn reopened(
     data: &tintcast_engine::DataDir,
     lock: &tintcast_engine::EngineLock,
 ) -> Engine {
-    let integrations: Vec<Box<dyn Integration>> = vec![Box::new(five_steps())];
-    Engine::new(data.clone(), fake, integrations).with_lock(lock.clone())
+    Engine::new(data.clone(), fake, five_steps()).with_lock(lock.clone())
 }
 
 #[test]
@@ -164,8 +171,7 @@ fn rolling_back_a_crash_keeps_what_an_earlier_apply_set() {
             panic!("power lost before writing {resource}");
         }
     }));
-    let crashing =
-        Engine::new(data.clone(), services, vec![Box::new(five_steps())]).with_lock(lock.clone());
+    let crashing = Engine::new(data.clone(), services, five_steps()).with_lock(lock.clone());
     assert!(
         catch_unwind(AssertUnwindSafe(
             || crashing.apply(&ApplyRequest::new(moondust()))
@@ -209,7 +215,7 @@ fn rolling_back_a_crash_keeps_what_an_earlier_apply_set() {
 
 #[test]
 fn a_journal_that_does_not_parse_is_set_aside_and_later_applies_still_run() {
-    let f = fixture(vec![Box::new(five_steps())]);
+    let f = fixture(five_steps());
     seed_user_setup(&f.fake);
     std::fs::write(
         f.data.journal().join("1234-9-0.json"),
@@ -262,7 +268,7 @@ fn keep_as_is_drops_the_journal_and_leaves_the_changes() {
 
 #[test]
 fn startup_waits_for_a_live_apply_instead_of_reporting_it() {
-    let f = fixture(vec![Box::new(five_steps())]);
+    let f = fixture(five_steps());
     let guard = f.lock.acquire().unwrap();
     std::thread::scope(|scope| {
         let result = scope.spawn(|| f.engine.startup()).join().unwrap();
@@ -284,8 +290,7 @@ fn crash_right_after_write(
             panic!("power lost right after writing {resource}");
         }
     }));
-    let crashing =
-        Engine::new(data.clone(), services, vec![Box::new(five_steps())]).with_lock(lock.clone());
+    let crashing = Engine::new(data.clone(), services, five_steps()).with_lock(lock.clone());
     assert!(
         catch_unwind(AssertUnwindSafe(
             || crashing.apply(&ApplyRequest::new(moondust()))
@@ -374,7 +379,7 @@ fn keep_as_is_after_a_crash_right_after_a_write_still_lets_restore_put_it_back()
 
 #[test]
 fn a_run_id_that_is_not_a_journal_name_reaches_no_file_outside_the_journal() {
-    let f = fixture(vec![Box::new(five_steps())]);
+    let f = fixture(five_steps());
     seed_user_setup(&f.fake);
     crash_after(2, f.fake.clone(), &f.data, &f.lock);
     let run = f.engine.startup().unwrap().interrupted.remove(0);
@@ -401,4 +406,55 @@ fn a_run_id_that_is_not_a_journal_name_reaches_no_file_outside_the_journal() {
         f.fake.registry(PERSONALIZE, "AppsUseLightTheme"),
         Some(RegistryValue::Dword(0))
     );
+}
+
+#[test]
+fn a_crash_inside_a_registry_transaction_leaves_none_of_it_written() {
+    let (_temp, data) = data_dir();
+    let fake = Arc::new(FakeServices::new());
+    seed_user_setup(&fake);
+    let lock = unique_lock();
+    let count = Arc::new(AtomicUsize::new(0));
+    let services = Arc::new(Hooked::before(fake.clone(), move |resource| {
+        if count.fetch_add(1, Ordering::SeqCst) == 2 {
+            panic!("power lost before writing {resource}");
+        }
+    }));
+    let crashing = Engine::new(data.clone(), services, vec![Box::new(system_integration())])
+        .with_lock(lock.clone());
+    assert!(
+        catch_unwind(AssertUnwindSafe(
+            || crashing.apply(&ApplyRequest::new(moondust()))
+        ))
+        .is_err()
+    );
+    assert_eq!(
+        fake.registry(PERSONALIZE, "AppsUseLightTheme"),
+        Some(RegistryValue::Dword(1)),
+        "the transaction never committed"
+    );
+
+    let engine = Engine::new(
+        data.clone(),
+        fake.clone(),
+        vec![Box::new(system_integration())],
+    )
+    .with_lock(lock);
+    let run = engine.startup().unwrap().interrupted.remove(0);
+    assert!(run.applied.is_empty());
+    assert_eq!(run.pending.len(), 4);
+    assert!(run.pending.iter().all(|s| s.state == StepState::Pending));
+    fake.clear_calls();
+    let report = engine.roll_back(&run.run_id).unwrap();
+
+    assert!(
+        report
+            .items
+            .iter()
+            .all(|i| i.result == RestoreResult::Unchanged),
+        "{report:?}"
+    );
+    assert!(fake.writes().is_empty());
+    assert!(engine.ledger_entries().unwrap().is_empty());
+    assert!(journal_files(&data).is_empty());
 }

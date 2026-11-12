@@ -100,10 +100,6 @@ impl Ledger {
         self.entries.get_mut(resource)
     }
 
-    pub(crate) fn contains(&self, resource: &str) -> bool {
-        self.entries.contains_key(resource)
-    }
-
     pub(crate) fn insert(&mut self, entry: LedgerEntry) {
         self.entries.insert(entry.resource.clone(), entry);
     }
@@ -415,7 +411,7 @@ mod tests {
                 serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
             assert_eq!(value["version"], 1);
         }
-        assert!(store.load_ledger().unwrap().contains("r1"));
+        assert!(store.load_ledger().unwrap().get("r1").is_some());
     }
 
     #[test]

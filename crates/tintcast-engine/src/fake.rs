@@ -1,11 +1,15 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use tintcast_theme::WallpaperPosition;
 
-use crate::services::{RegistryValue, SystemError, SystemResult, SystemServices};
+pub use crate::services::DISPLAY_NOT_CONNECTED;
+use crate::services::{
+    CommitError, RegistryChange, RegistryValue, SystemError, SystemResult, SystemServices,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CallKind {
@@ -59,9 +63,22 @@ pub struct FakeFile {
     pub modified: SystemTime,
 }
 
+pub type FakeRegistry = BTreeMap<(String, String), RegistryValue>;
+
+type CommitHook = dyn Fn(&mut FakeRegistry) + Send + Sync;
+
+#[derive(Default)]
+struct Hooks(Vec<Box<CommitHook>>);
+
+impl fmt::Debug for Hooks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} commit hooks", self.0.len())
+    }
+}
+
 #[derive(Debug, Default)]
 struct State {
-    registry: BTreeMap<(String, String), RegistryValue>,
+    registry: FakeRegistry,
     connected: Vec<String>,
     wallpapers: BTreeMap<String, PathBuf>,
     position: WallpaperPosition,
@@ -69,14 +86,25 @@ struct State {
     broadcasts: usize,
     calls: Vec<Call>,
     failures: Vec<Failure>,
+    hooks: Hooks,
+}
+
+impl State {
+    fn record(&mut self, kind: CallKind, target: String) -> Option<String> {
+        let failure = self
+            .failures
+            .iter()
+            .find(|f| f.kind == kind && f.target.as_deref().is_none_or(|t| target.contains(t)))
+            .map(|f| f.message.clone());
+        self.calls.push(Call { kind, target });
+        failure
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct FakeServices {
     state: Mutex<State>,
 }
-
-pub const DISPLAY_NOT_CONNECTED: &str = "Display not connected";
 
 impl FakeServices {
     pub fn new() -> Self {
@@ -102,15 +130,8 @@ impl FakeServices {
         kind: CallKind,
         target: impl Into<String>,
     ) -> SystemResult<MutexGuard<'_, State>> {
-        let target = target.into();
         let mut state = self.state();
-        let failure = state
-            .failures
-            .iter()
-            .find(|f| f.kind == kind && f.target.as_deref().is_none_or(|t| target.contains(t)))
-            .map(|f| f.message.clone());
-        state.calls.push(Call { kind, target });
-        match failure {
+        match state.record(kind, target.into()) {
             Some(message) => Err(SystemError(message)),
             None => Ok(state),
         }
@@ -122,6 +143,10 @@ impl FakeServices {
             target: target.map(str::to_owned),
             message: message.to_owned(),
         });
+    }
+
+    pub fn on_commit(&self, hook: impl Fn(&mut FakeRegistry) + Send + Sync + 'static) {
+        self.state().hooks.0.push(Box::new(hook));
     }
 
     pub fn clear_failures(&self) {
@@ -238,17 +263,32 @@ impl SystemServices for FakeServices {
             .cloned())
     }
 
-    fn write_registry(&self, key: &str, name: &str, value: &RegistryValue) -> SystemResult<()> {
-        let mut state = self.call(CallKind::WriteRegistry, registry_target(key, name))?;
-        state
-            .registry
-            .insert((key.to_owned(), name.to_owned()), value.clone());
-        Ok(())
-    }
-
-    fn delete_registry(&self, key: &str, name: &str) -> SystemResult<()> {
-        let mut state = self.call(CallKind::DeleteRegistry, registry_target(key, name))?;
-        state.registry.remove(&(key.to_owned(), name.to_owned()));
+    fn commit_registry(&self, changes: &[RegistryChange]) -> Result<(), CommitError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut state = self.state();
+        for (index, change) in changes.iter().enumerate() {
+            let kind = match change.value {
+                Some(_) => CallKind::WriteRegistry,
+                None => CallKind::DeleteRegistry,
+            };
+            if let Some(message) = state.record(kind, registry_target(&change.key, &change.name)) {
+                return Err(CommitError::at(index, SystemError(message)));
+            }
+        }
+        for change in changes {
+            let id = (change.key.clone(), change.name.clone());
+            match &change.value {
+                Some(value) => state.registry.insert(id, value.clone()),
+                None => state.registry.remove(&id),
+            };
+        }
+        let hooks = std::mem::take(&mut state.hooks);
+        for hook in &hooks.0 {
+            hook(&mut state.registry);
+        }
+        state.hooks = hooks;
         Ok(())
     }
 
@@ -339,8 +379,12 @@ mod tests {
     #[test]
     fn keeps_state_in_memory_and_records_every_call() {
         let fake = FakeServices::with_monitors(&["one"]);
-        fake.write_registry(KEY, "AccentColor", &RegistryValue::Dword(7))
-            .unwrap();
+        fake.commit_registry(&[RegistryChange::set(
+            KEY,
+            "AccentColor",
+            RegistryValue::Dword(7),
+        )])
+        .unwrap();
         assert_eq!(
             fake.read_registry(KEY, "AccentColor").unwrap(),
             Some(RegistryValue::Dword(7))
@@ -369,13 +413,57 @@ mod tests {
         let fake = FakeServices::new();
         fake.fail(CallKind::WriteRegistry, Some("AccentColor"), "denied");
         let error = fake
-            .write_registry(KEY, "AccentColor", &RegistryValue::Dword(1))
+            .commit_registry(&[RegistryChange::set(
+                KEY,
+                "AccentColor",
+                RegistryValue::Dword(1),
+            )])
             .unwrap_err();
         assert_eq!(error.to_string(), "denied");
-        fake.write_registry(KEY, "ColorizationColor", &RegistryValue::Dword(1))
-            .unwrap();
+        fake.commit_registry(&[RegistryChange::set(
+            KEY,
+            "ColorizationColor",
+            RegistryValue::Dword(1),
+        )])
+        .unwrap();
         assert_eq!(fake.registry(KEY, "AccentColor"), None);
         assert_eq!(fake.calls().len(), 2);
+    }
+
+    #[test]
+    fn a_commit_lands_whole_or_not_at_all_and_hooks_see_it_whole() {
+        let fake = FakeServices::new();
+        let seen: std::sync::Arc<Mutex<Vec<[Option<RegistryValue>; 2]>>> =
+            std::sync::Arc::default();
+        let observer = seen.clone();
+        fake.on_commit(move |registry| {
+            let get = |name: &str| registry.get(&(KEY.to_owned(), name.to_owned())).cloned();
+            observer
+                .lock()
+                .unwrap()
+                .push([get("AccentColor"), get("ColorizationColor")]);
+        });
+        fake.fail(CallKind::WriteRegistry, Some("ColorizationColor"), "denied");
+        let both = [
+            RegistryChange::set(KEY, "AccentColor", RegistryValue::Dword(1)),
+            RegistryChange::set(KEY, "ColorizationColor", RegistryValue::Dword(2)),
+        ];
+        let error = fake.commit_registry(&both).unwrap_err();
+        assert_eq!(error.index, Some(1));
+        assert_eq!(fake.registry(KEY, "AccentColor"), None);
+        assert!(seen.lock().unwrap().is_empty());
+
+        fake.clear_failures();
+        fake.commit_registry(&both).unwrap();
+        fake.commit_registry(&[RegistryChange::delete(KEY, "AccentColor")])
+            .unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                [Some(RegistryValue::Dword(1)), Some(RegistryValue::Dword(2))],
+                [None, Some(RegistryValue::Dword(2))],
+            ]
+        );
     }
 
     #[test]

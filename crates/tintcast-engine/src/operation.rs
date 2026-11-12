@@ -6,7 +6,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tintcast_theme::WallpaperPosition;
 
-use crate::services::RegistryValue;
+use crate::services::{RegistryChange, RegistryValue};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -89,6 +89,11 @@ impl Operation {
             Self::SetRegistryValue {
                 key,
                 name,
+                value: Some(RegistryValue::String(text)),
+            } => format!(r#"Set {name} to "{text}" in HKCU\{key}"#),
+            Self::SetRegistryValue {
+                key,
+                name,
                 value: None,
             } => format!(r"Delete {name} from HKCU\{key}"),
             Self::SetWallpaper { monitor, image } => {
@@ -108,6 +113,19 @@ impl Operation {
                 pointer,
                 value: None,
             } => format!("Remove {pointer} from {}", path.display()),
+        }
+    }
+
+    pub fn registry_change(&self, state: &ResourceState) -> Option<RegistryChange> {
+        let Self::SetRegistryValue { key, name, .. } = self else {
+            return None;
+        };
+        match state {
+            ResourceState::Registry { value } => {
+                Some(RegistryChange::set(key, name, value.clone()))
+            }
+            ResourceState::Absent => Some(RegistryChange::delete(key, name)),
+            _ => None,
         }
     }
 
@@ -223,6 +241,15 @@ mod tests {
             value: Some(RegistryValue::Binary(vec![0; 32])),
         };
         assert_eq!(bytes.summary(), r"Set AccentPalette to 32 bytes in HKCU\K");
+        let text = Operation::SetRegistryValue {
+            key: r"Control Panel\Colors".into(),
+            name: "Background".into(),
+            value: Some(RegistryValue::String("30 30 30".into())),
+        };
+        assert_eq!(
+            text.summary(),
+            r#"Set Background to "30 30 30" in HKCU\Control Panel\Colors"#
+        );
     }
 
     #[test]

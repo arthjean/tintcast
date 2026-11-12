@@ -3,8 +3,12 @@
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Mutex;
+
+static ENGINE_LOCK: Mutex<()> = Mutex::new(());
 
 fn tintcast(local_app_data: &Path, args: &[&str]) -> Output {
+    let _serial = ENGINE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     Command::new(env!("CARGO_BIN_EXE_tintcast"))
         .args(args)
         .env("LOCALAPPDATA", local_app_data)
@@ -81,4 +85,42 @@ fn a_folder_without_themes_fails_and_bad_usage_exits_two() {
     );
     assert_eq!(tintcast(temp.path(), &["import"]).status.code(), Some(2));
     assert_eq!(tintcast(temp.path(), &[]).status.code(), Some(2));
+}
+
+#[test]
+fn read_only_commands_run_against_windows_without_changing_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let report = tintcast(temp.path(), &["report", "--json"]);
+    assert_eq!(report.status.code(), Some(0), "{report:?}");
+    let value: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    let watched = value["watched"].as_object().unwrap();
+    assert!(watched.contains_key(
+        r"reg:HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme"
+    ));
+    assert!(watched.contains_key("wallpaper-position"));
+    assert_eq!(watched["terminal-fragment"], serde_json::Value::Null);
+    assert!(!temp.path().join("Tintcast").exists());
+
+    let unknown = tintcast(temp.path(), &["apply", "Moondust"]);
+    assert_eq!(unknown.status.code(), Some(2), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr)
+            .contains("No theme named Moondust. Run tintcast list.")
+    );
+
+    let plan = tintcast(temp.path(), &["plan", "linen", "--wallpaper", "2"]);
+    assert_eq!(plan.status.code(), Some(0), "{plan:?}");
+    let text = stdout(&plan);
+    assert!(
+        text.starts_with("Plan for Linen (wallpaper 2 of 3):"),
+        "{text}"
+    );
+    assert!(text.contains("Windows Terminal: skipped. Windows Terminal is not installed."));
+    assert!(text.trim_end().ends_with("Nothing was changed."));
+    assert!(!temp.path().join(r"Tintcast\ledger.json").exists());
+
+    let status = tintcast(temp.path(), &["status", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(value["current"], serde_json::Value::Null);
+    assert_eq!(value["ledger_entries"], 0);
 }

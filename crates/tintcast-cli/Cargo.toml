@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+name = "tintcast_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "tintcast"
 path = "src/main.rs"
@@ -13,8 +17,11 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 tintcast-windows.workspace = true
 
 [dev-dependencies]
 image.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
