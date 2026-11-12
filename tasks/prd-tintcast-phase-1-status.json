@@ -25,10 +25,10 @@
     {
       "id": "EP-003",
       "title": "Windows integrations and acceptance suite",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "stories_total": 4,
-      "stories_done": 0
+      "stories_done": 4
     },
     {
       "id": "EP-004",
@@ -162,59 +162,59 @@
       "id": "US-009",
       "title": "Command line and Sandbox acceptance runner",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-003",
         "US-005"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T13:53:58Z",
+      "completed_at": "2026-11-12T12:49:52Z",
+      "reviewed_at": "2026-11-12T12:49:52Z"
     },
     {
       "id": "US-010",
       "title": "Light or dark mode and accent color",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-009"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T13:53:58Z",
+      "completed_at": "2026-11-12T12:49:52Z",
+      "reviewed_at": "2026-11-12T12:49:52Z"
     },
     {
       "id": "US-011",
       "title": "Wallpaper on every monitor",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "M",
       "blocked_by": [
         "US-009",
         "US-006"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T13:53:58Z",
+      "completed_at": "2026-11-12T12:49:52Z",
+      "reviewed_at": "2026-11-12T12:49:52Z"
     },
     {
       "id": "US-012",
       "title": "Windows Terminal color schemes",
       "epic": "EP-003",
-      "status": "TODO",
+      "status": "DONE",
       "priority": "P0",
       "size": "L",
       "blocked_by": [
         "US-009"
       ],
-      "started_at": null,
-      "completed_at": null,
-      "reviewed_at": null
+      "started_at": "2026-11-09T13:53:58Z",
+      "completed_at": "2026-11-12T12:49:52Z",
+      "reviewed_at": "2026-11-12T12:49:52Z"
     },
     {
       "id": "US-013",
